@@ -1,0 +1,24 @@
+import { questions, type Question } from '../data/questions'
+
+export interface DailyProgress { date:string; questionIds:string[]; index:number; guesses:(number|null)[]; scores:(number|null)[]; revealed:boolean; completed:boolean }
+export interface HistoryEntry { date:string; score:number; accuracy:number; exact:number }
+export interface AppState { version:number; daily:DailyProgress; history:HistoryEntry[]; currentStreak:number; bestStreak:number; totalPoints:number; bestScore:number; totalGames:number; exactGuesses:number }
+
+export const STORAGE_KEY='cifra-progress-v1'
+
+export function croatiaDateKey(now=new Date()) { const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Zagreb',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(now); const get=(t:string)=>parts.find(p=>p.type===t)?.value||''; return `${get('year')}-${get('month')}-${get('day')}` }
+export function formatCroatianDate(dateKey:string) { const [y,m,d]=dateKey.split('-').map(Number); return new Intl.DateTimeFormat('hr-HR',{day:'numeric',month:'long',year:'numeric'}).format(new Date(y,m-1,d)) }
+export function formatPrice(value:number) { return new Intl.NumberFormat('hr-HR',{style:'currency',currency:'EUR',minimumFractionDigits:2,maximumFractionDigits:2}).format(value) }
+export function parseGuess(raw:string) { const trimmed=raw.trim(); if(!/^\d+(?:[.,]\d+)?$/.test(trimmed)) return null; const value=Number(trimmed.replace(',', '.')); return Number.isFinite(value)&&value>0?value:null }
+export function scoreGuess(guess:number,actual:number) { const relativeError=Math.abs(guess-actual)/actual; return Math.max(0,Math.min(1000,Math.round(1000*Math.exp(-4*relativeError)))) }
+
+function hash(input:string){let h=2166136261;for(let i=0;i<input.length;i++){h^=input.charCodeAt(i);h=Math.imul(h,16777619)}return h>>>0}
+function mulberry32(seed:number){return()=>{let t=seed+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return ((t^t>>>14)>>>0)/4294967296}}
+export function selectDailyQuestions(date:string):string[] { const seed=hash(`cifra-${date}`); const rand=mulberry32(seed); const shuffled=[...questions]; for(let i=shuffled.length-1;i>0;i--){const j=Math.floor(rand()*(i+1));[shuffled[i],shuffled[j]]=[shuffled[j],shuffled[i]]} const selected:Question[]=[]; const used=new Set<string>(); for(const q of shuffled){if(selected.length===5)break;if(!used.has(q.category)){selected.push(q);used.add(q.category)}} for(const q of shuffled){if(selected.length===5)break;if(!selected.includes(q)){selected.push(q)}} return selected.slice(0,5).map(q=>q.id) }
+export function getQuestions(ids:string[]){return ids.map(id=>questions.find(q=>q.id===id)).filter((q):q is Question=>Boolean(q))}
+export function newDaily(date:string):DailyProgress { const ids=selectDailyQuestions(date);return{date,questionIds:ids,index:0,guesses:Array(5).fill(null),scores:Array(5).fill(null),revealed:false,completed:false} }
+export function loadState():AppState { const defaultState:AppState={version:1,daily:newDaily(croatiaDateKey()),history:[],currentStreak:0,bestStreak:0,totalPoints:0,bestScore:0,totalGames:0,exactGuesses:0}; try{const raw=localStorage.getItem(STORAGE_KEY);if(!raw)return defaultState;const saved=JSON.parse(raw) as Partial<AppState>;if(saved.version!==1||!saved.daily||!Array.isArray(saved.daily.guesses)||saved.daily.guesses.length!==5||!Array.isArray(saved.daily.scores)||saved.daily.scores.length!==5||!Array.isArray(saved.daily.questionIds)||saved.daily.questionIds.length!==5)return defaultState;const today=croatiaDateKey();const normalized:AppState={version:1,daily:saved.daily.date===today?saved.daily:newDaily(today),history:Array.isArray(saved.history)?saved.history:[],currentStreak:typeof saved.currentStreak==='number'?saved.currentStreak:0,bestStreak:typeof saved.bestStreak==='number'?saved.bestStreak:0,totalPoints:typeof saved.totalPoints==='number'?saved.totalPoints:0,bestScore:typeof saved.bestScore==='number'?saved.bestScore:0,totalGames:typeof saved.totalGames==='number'?saved.totalGames:0,exactGuesses:typeof saved.exactGuesses==='number'?saved.exactGuesses:0};return normalized}catch{return defaultState} }
+export function saveState(state:AppState){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state))}catch{}}
+export function daysBetween(a:string,b:string){const pa=a.split('-').map(Number),pb=b.split('-').map(Number);const da=Date.UTC(pa[0],pa[1]-1,pa[2]),db=Date.UTC(pb[0],pb[1]-1,pb[2]);return Math.round((db-da)/86400000)}
+export function challengeNumber(date:string){const [y,m,d]=date.split('-').map(Number);const value=Date.UTC(y,m-1,d)-Date.UTC(2026,0,1);return Math.max(1,Math.floor(value/86400000)+1)}
+export function calculateStreak(lastDate:string|null,today:string,currentStreak:number){if(lastDate===today)return currentStreak;if(!lastDate)return 1;return daysBetween(lastDate,today)===1?currentStreak+1:1}
