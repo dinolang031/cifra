@@ -1,0 +1,52 @@
+export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[]
+
+export interface Database {
+  public: {
+    Tables: {
+      profiles: {
+        Row: { id: string; username: string; display_name: string | null; avatar_url: string | null; created_at: string; updated_at: string }
+        Insert: { id: string; username?: string; display_name?: string | null; avatar_url?: string | null }
+        Update: { username?: string; display_name?: string | null; avatar_url?: string | null; updated_at?: string }
+        Relationships: []
+      }
+      questions: {
+        Row: { id: string; question: string; item_name: string; category: string; actual_price: number; currency: string; unit: string; location: string; image_url: string | null; explanation: string | null; verification_status: string; is_demo: boolean; active: boolean }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
+      daily_challenges: {
+        Row: { id: string; challenge_date: string; published: boolean; is_demo: boolean; created_at: string; published_at: string | null }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
+      challenge_questions: {
+        Row: { challenge_id: string; question_id: string; position: number }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
+      game_results: {
+        Row: { id: string; user_id: string; challenge_id: string; challenge_date: string; total_score: number; guesses: number[]; question_scores: number[]; exact_guesses: number; average_error_percent: number; completed_at: string }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
+      user_statistics: {
+        Row: { user_id: string; current_streak: number; best_streak: number; last_completed_date: string | null; total_games: number; total_points: number; best_score: number; exact_guesses: number; updated_at: string }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
+    }
+    Views: Record<string, never>
+    Functions: {
+      get_today_challenge: { Args: Record<string, never>; Returns: { challenge_id: string; challenge_date: string; question_ids: string[]; is_demo: boolean }[] }
+      start_daily_attempt: { Args: { p_challenge_date: string }; Returns: { attempt_token: string; challenge_id: string; challenge_date: string }[] }
+      submit_daily_result: { Args: { p_challenge_date: string; p_guesses: number[]; p_attempt_token: string }; Returns: { result_id: string; total_score: number; question_scores: number[]; exact_guesses: number; average_error_percent: number; current_streak: number; best_streak: number; duplicate: boolean }[] }
+    }
+    Enums: Record<string, never>
+    CompositeTypes: Record<string, never>
+  }
+}
