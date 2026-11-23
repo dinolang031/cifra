@@ -80,8 +80,8 @@ export function AuthDialog({ open, onClose, signedIn, email, passwordRecovery, o
         if (requestError) throw requestError
         setNotice('Ako račun postoji, poslana je poveznica za postavljanje nove lozinke.')
       } else {
-        if (password.length < 8) {
-          setError('Lozinka mora imati najmanje 8 znakova.')
+        if (password.length < 6) {
+          setError('Lozinka mora imati najmanje 6 znakova.')
           return
         }
         const { error: requestError } = await supabase.auth.updateUser({ password })
@@ -130,7 +130,7 @@ export function AuthDialog({ open, onClose, signedIn, email, passwordRecovery, o
         </div>}
         <form className="auth-form" onSubmit={submit}>
           {activeMode !== 'new-password' && <label>Email adresa<input type="email" autoComplete="email" required value={address} onChange={event => setAddress(event.target.value)} /></label>}
-          {activeMode !== 'recovery' && <label>{activeMode === 'new-password' ? 'Nova lozinka' : 'Lozinka'}<input type="password" autoComplete={activeMode === 'register' ? 'new-password' : activeMode === 'new-password' ? 'new-password' : 'current-password'} required minLength={activeMode === 'register' || activeMode === 'new-password' ? 8 : 1} value={password} onChange={event => setPassword(event.target.value)} /></label>}
+          {activeMode !== 'recovery' && <label>{activeMode === 'new-password' ? 'Nova lozinka' : 'Lozinka'}<input type="password" autoComplete={activeMode === 'register' ? 'new-password' : activeMode === 'new-password' ? 'new-password' : 'current-password'} required minLength={activeMode === 'register' || activeMode === 'new-password' ? 6 : 1} value={password} onChange={event => setPassword(event.target.value)} /></label>}
           <button className="primary full" type="submit" disabled={busy || Boolean(supabaseConfigurationError)}>
             {busy ? 'Molimo pričekaj…' : activeMode === 'register' ? 'Izradi račun' : activeMode === 'recovery' ? 'Pošalji poveznicu' : activeMode === 'new-password' ? 'Spremi novu lozinku' : 'Prijavi se'}
           </button>
