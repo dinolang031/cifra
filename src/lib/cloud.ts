@@ -34,6 +34,50 @@ export interface CloudAttemptProgress {
   answered_count: number
 }
 
+export interface CloudGameplayMode {
+  timed_enabled: boolean
+  challenge_id: string
+  challenge_date: string
+  is_demo: boolean
+  attempt_ruleset: 'untimed-v1' | 'timed-v1' | null
+  has_result: boolean
+}
+
+export interface CloudTimedQuestion {
+  question_position: number
+  question_id: string
+  question_text: string
+  item_name: string
+  category: string
+  unit: string
+  location: string
+  outcome: 'active' | 'answered' | 'timed_out'
+  started_at: string
+  deadline_at: string
+  server_now: string
+  guess: number | null
+  actual_price: number | null
+  question_score: number | null
+  explanation: string | null
+  duplicate: boolean
+}
+
+export interface CloudTimedAttemptStart extends CloudTimedQuestion {
+  attempt_token: string
+}
+
+export interface CloudTimedResult {
+  result_id: string
+  total_score: number
+  question_scores: number[]
+  guesses: (number | null)[]
+  exact_guesses: number
+  average_error_percent: number | null
+  current_streak: number
+  best_streak: number
+  duplicate: boolean
+}
+
 export interface CloudSnapshot {
   currentStreak: number
   bestStreak: number
@@ -44,9 +88,112 @@ export interface CloudSnapshot {
   history: HistoryEntry[]
   todayResult: {
     challengeId: string
-    guesses: number[]
+    guesses: (number | null)[]
     scores: number[]
   } | null
+}
+
+export async function fetchPublicTimedGameplayEnabled(): Promise<boolean> {
+  if (!supabase) return false
+  const { data, error } = await supabase.rpc('get_public_timed_gameplay_enabled')
+  if (error) throw error
+  return data === true
+}
+
+export async function fetchTodayGameplayMode(date: string): Promise<CloudGameplayMode> {
+  if (!supabase) throw new Error('Supabase nije konfiguriran.')
+  const { data, error } = await supabase.rpc('get_today_game_mode', {
+    p_challenge_date: date,
+  })
+  if (error) throw error
+  const mode = data?.[0]
+  if (!mode) throw new Error('Poslužitelj nije vratio način igre za današnji izazov.')
+  return mode
+}
+
+export async function startTimedDailyAttempt(date: string): Promise<CloudTimedAttemptStart> {
+  if (!supabase) throw new Error('Supabase nije konfiguriran.')
+  const { data, error } = await supabase.rpc('start_timed_daily_attempt', {
+    p_challenge_date: date,
+  })
+  if (error) throw error
+  const attempt = data?.[0]
+  if (!attempt?.attempt_token) throw new Error('Poslužitelj nije otvorio vremenski pokušaj.')
+  return attempt
+}
+
+export async function fetchTimedAttemptProgress(date: string): Promise<CloudTimedQuestion[]> {
+  if (!supabase) throw new Error('Supabase nije konfiguriran.')
+  const { data, error } = await supabase.rpc('get_timed_attempt_progress', {
+    p_challenge_date: date,
+  })
+  if (error) throw error
+  return data ?? []
+}
+
+export async function startTimedQuestion(
+  date: string,
+  position: number,
+  attemptToken: string,
+): Promise<CloudTimedQuestion> {
+  if (!supabase) throw new Error('Supabase nije konfiguriran.')
+  const { data, error } = await supabase.rpc('start_timed_question', {
+    p_challenge_date: date,
+    p_question_position: position,
+    p_attempt_token: attemptToken,
+  })
+  if (error) throw error
+  const question = data?.[0]
+  if (!question) throw new Error('Poslužitelj nije pokrenuo sljedeće pitanje.')
+  return question
+}
+
+export async function submitTimedAnswer(
+  date: string,
+  position: number,
+  guess: number,
+  attemptToken: string,
+): Promise<CloudTimedQuestion> {
+  if (!supabase) throw new Error('Supabase nije konfiguriran.')
+  const { data, error } = await supabase.rpc('submit_timed_answer', {
+    p_challenge_date: date,
+    p_question_position: position,
+    p_guess: guess,
+    p_attempt_token: attemptToken,
+  })
+  if (error) throw error
+  const answer = data?.[0]
+  if (!answer) throw new Error('Poslužitelj nije potvrdio odgovor.')
+  return answer
+}
+
+export async function expireTimedQuestion(
+  date: string,
+  position: number,
+  attemptToken: string,
+): Promise<CloudTimedQuestion> {
+  if (!supabase) throw new Error('Supabase nije konfiguriran.')
+  const { data, error } = await supabase.rpc('expire_timed_question', {
+    p_challenge_date: date,
+    p_question_position: position,
+    p_attempt_token: attemptToken,
+  })
+  if (error) throw error
+  const question = data?.[0]
+  if (!question) throw new Error('Poslužitelj nije potvrdio istek vremena.')
+  return question
+}
+
+export async function submitTimedResult(date: string, attemptToken: string): Promise<CloudTimedResult> {
+  if (!supabase) throw new Error('Supabase nije konfiguriran.')
+  const { data, error } = await supabase.rpc('submit_timed_daily_result', {
+    p_challenge_date: date,
+    p_attempt_token: attemptToken,
+  })
+  if (error) throw error
+  const result = data?.[0]
+  if (!result) throw new Error('Poslužitelj nije vratio završni rezultat.')
+  return result
 }
 
 export async function fetchTodayChallenge(): Promise<CloudChallenge> {
@@ -128,7 +275,9 @@ export async function fetchCloudSnapshot(user: User): Promise<CloudSnapshot> {
     date: result.challenge_date,
     score: result.total_score,
     exact: result.exact_guesses,
-    accuracy: Math.max(0, 100 - Number(result.average_error_percent)),
+    accuracy: result.average_error_percent === null
+      ? null
+      : Math.max(0, 100 - Number(result.average_error_percent)),
   }))
 
   const stats = statsResponse.data

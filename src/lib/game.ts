@@ -13,12 +13,44 @@ export interface DailyProgress {
   updatedAt: number
 }
 
-export interface HistoryEntry { date: string; score: number; accuracy: number; exact: number }
+export interface TimedQuestion {
+  position: number
+  questionId: string
+  question: string
+  itemName: string
+  category: string
+  unit: string
+  location: string
+  outcome: 'active' | 'answered' | 'timed_out'
+  startedAt: string
+  deadlineAt: string
+  serverNow: string | null
+  guess: number | null
+  actualPrice: number | null
+  score: number | null
+  explanation: string | null
+}
+
+export interface TimedDailyProgress {
+  date: string
+  challengeId: string | null
+  ruleset: 'timed-v1' | 'guest-timed-v1'
+  isDemo: boolean
+  questions: TimedQuestion[]
+  guestQuestionIds: string[] | null
+  serverRoundTripMs: number
+  completed: boolean
+  updatedAt: number
+}
+
+export interface HistoryEntry { date: string; score: number; accuracy: number | null; exact: number }
 export interface QuestionHistoryEntry { date: string; questionIds: string[] }
 export interface AppState {
   version: number
   daily: DailyProgress
+  timedDaily: TimedDailyProgress | null
   archivedDaily: DailyProgress[]
+  archivedTimedDaily: TimedDailyProgress[]
   history: HistoryEntry[]
   questionHistory: QuestionHistoryEntry[]
   currentStreak: number
@@ -91,6 +123,173 @@ export function parseGuess(raw: string) {
 export function scoreGuess(guess: number, actual: number) {
   const relativeError = Math.abs(guess - actual) / actual
   return Math.max(0, Math.min(1000, Math.round(1000 * Math.exp(-4 * relativeError))))
+}
+
+export const TIMED_QUESTION_DURATION_MS = 20_000
+
+export function createGuestTimedDaily(
+  daily: DailyProgress,
+  isDemo: boolean,
+  now = Date.now(),
+): TimedDailyProgress {
+  const firstQuestion = createGuestTimedQuestion(daily.questionIds[0], 1, now)
+  return {
+    date: daily.date,
+    challengeId: daily.challengeId,
+    ruleset: 'guest-timed-v1',
+    isDemo,
+    questions: [firstQuestion],
+    guestQuestionIds: [...daily.questionIds],
+    serverRoundTripMs: 0,
+    completed: false,
+    updatedAt: now,
+  }
+}
+
+export function createGuestTimedQuestion(questionId: string, position: number, now = Date.now()): TimedQuestion {
+  const question = getQuestions([questionId])[0]
+  if (!question) throw new Error('Timed guest question is unavailable.')
+  return {
+    position,
+    questionId: question.id,
+    question: question.question,
+    itemName: question.itemName,
+    category: question.category,
+    unit: question.unit,
+    location: question.location,
+    outcome: 'active',
+    startedAt: new Date(now).toISOString(),
+    deadlineAt: new Date(now + TIMED_QUESTION_DURATION_MS).toISOString(),
+    serverNow: null,
+    guess: null,
+    actualPrice: null,
+    score: null,
+    explanation: null,
+  }
+}
+
+export function startGuestTimedQuestion(progress: TimedDailyProgress, now = Date.now()): TimedDailyProgress {
+  const previous = progress.questions[progress.questions.length - 1]
+  const position = progress.questions.length + 1
+  if (progress.ruleset !== 'guest-timed-v1' || !previous || previous.outcome === 'active'
+    || position > 5 || !progress.guestQuestionIds || progress.guestQuestionIds.length !== 5) {
+    throw new Error('The next guest question cannot be started yet.')
+  }
+  return {
+    ...progress,
+    questions: [...progress.questions, createGuestTimedQuestion(progress.guestQuestionIds[position - 1], position, now)],
+    updatedAt: now,
+  }
+}
+
+export function resolveGuestTimedAnswer(
+  progress: TimedDailyProgress,
+  position: number,
+  guess: number,
+  now = Date.now(),
+): TimedDailyProgress {
+  const question = progress.questions[position - 1]
+  if (progress.ruleset !== 'guest-timed-v1' || !question || question.position !== position
+    || question.outcome !== 'active' || now >= Date.parse(question.deadlineAt)) {
+    throw new Error('This timed guest question is no longer accepting answers.')
+  }
+  const actualPrice = getQuestions([question.questionId])[0]?.actualPrice
+  if (actualPrice === undefined) throw new Error('Timed guest question price is unavailable.')
+  return {
+    ...progress,
+    questions: progress.questions.map((current, index) => index === position - 1
+      ? { ...current, outcome: 'answered', guess, actualPrice, score: scoreGuess(guess, actualPrice), explanation: getQuestions([current.questionId])[0].explanation }
+      : current),
+    updatedAt: now,
+  }
+}
+
+export function resolveGuestTimedTimeout(
+  progress: TimedDailyProgress,
+  position: number,
+  now = Date.now(),
+): TimedDailyProgress {
+  const question = progress.questions[position - 1]
+  if (progress.ruleset !== 'guest-timed-v1' || !question || question.position !== position
+    || question.outcome !== 'active' || now < Date.parse(question.deadlineAt)) {
+    throw new Error('This timed guest question has not expired.')
+  }
+  const localQuestion = getQuestions([question.questionId])[0]
+  if (!localQuestion) throw new Error('Timed guest question price is unavailable.')
+  return {
+    ...progress,
+    questions: progress.questions.map((current, index) => index === position - 1
+      ? { ...current, outcome: 'timed_out', guess: null, actualPrice: localQuestion.actualPrice, score: 0, explanation: localQuestion.explanation }
+      : current),
+    updatedAt: now,
+  }
+}
+
+export function completeGuestTimedDaily(state: AppState, progress: TimedDailyProgress, now = Date.now()): AppState {
+  if (progress.ruleset !== 'guest-timed-v1' || progress.questions.length !== 5
+    || progress.questions.some(question => question.outcome === 'active'
+      || question.actualPrice === null || question.score === null)) {
+    throw new Error('All five timed guest questions must be resolved before completion.')
+  }
+  if (state.daily.completed && state.daily.date === progress.date) {
+    return { ...state, timedDaily: { ...progress, completed: true, updatedAt: now } }
+  }
+  if (!progress.guestQuestionIds || progress.guestQuestionIds.length !== 5) {
+    throw new Error('Timed guest question order is unavailable.')
+  }
+
+  const guesses = progress.questions.map(question => question.guess)
+  const scores = progress.questions.map(question => question.score)
+  const actualPrices = progress.questions.map(question => question.actualPrice as number)
+  const total = scores.reduce<number>((sum, score) => sum + (score ?? 0), 0)
+  const exact = progress.questions.filter(question => question.outcome === 'answered'
+    && question.guess === question.actualPrice).length
+  const answered = progress.questions.filter(question => question.outcome === 'answered')
+  const averageError = answered.length
+    ? answered.reduce((sum, question) => sum + Math.abs((question.guess ?? 0) - (question.actualPrice ?? 0))
+      / (question.actualPrice ?? 1), 0) / answered.length * 100
+    : null
+  const last = state.history[state.history.length - 1]
+  const currentStreak = calculateStreak(last?.date ?? null, progress.date, state.currentStreak)
+  const history = state.history.some(entry => entry.date === progress.date)
+    ? state.history
+    : [...state.history, {
+        date: progress.date,
+        score: total,
+        accuracy: averageError === null ? null : 100 - Math.min(100, averageError),
+        exact,
+      }].slice(-30)
+  const completedDaily: DailyProgress = {
+    ...state.daily,
+    date: progress.date,
+    challengeId: progress.challengeId,
+    questionIds: [...progress.guestQuestionIds],
+    actualPrices,
+    guesses,
+    scores,
+    index: 4,
+    revealed: false,
+    completed: true,
+    updatedAt: now,
+  }
+
+  return {
+    ...state,
+    version: 3,
+    daily: completedDaily,
+    timedDaily: { ...progress, completed: true, updatedAt: now },
+    currentStreak,
+    bestStreak: Math.max(state.bestStreak, currentStreak),
+    totalGames: history.length === state.history.length ? state.totalGames : state.totalGames + 1,
+    totalPoints: history.length === state.history.length ? state.totalPoints : state.totalPoints + total,
+    bestScore: Math.max(state.bestScore, total),
+    exactGuesses: history.length === state.history.length ? state.exactGuesses : state.exactGuesses + exact,
+    history,
+  }
+}
+
+export function remainingTimerMs(deadlineMs: number, nowMs: number) {
+  return Math.max(0, deadlineMs - nowMs)
 }
 
 function hash(input: string) {
@@ -202,11 +401,65 @@ function normalizeDaily(value: unknown): DailyProgress | null {
   }
 }
 
+function normalizeTimedDaily(value: unknown): TimedDailyProgress | null {
+  if (!value || typeof value !== 'object') return null
+  const progress = value as Partial<TimedDailyProgress>
+  const timedQuestions = Array.isArray(progress.questions) ? progress.questions : null
+  if (typeof progress.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(progress.date)
+    || (progress.ruleset !== 'timed-v1' && progress.ruleset !== 'guest-timed-v1')
+    || !timedQuestions || timedQuestions.length > 5
+    || !Number.isFinite(progress.serverRoundTripMs) || (progress.serverRoundTripMs ?? -1) < 0
+    || !timedQuestions.every((question, index) => question && question.position === index + 1
+      && typeof question.questionId === 'string' && typeof question.question === 'string'
+      && typeof question.itemName === 'string' && typeof question.category === 'string'
+      && typeof question.unit === 'string' && typeof question.location === 'string'
+      && ['active', 'answered', 'timed_out'].includes(question.outcome)
+      && typeof question.startedAt === 'string' && Number.isFinite(Date.parse(question.startedAt))
+      && typeof question.deadlineAt === 'string' && Number.isFinite(Date.parse(question.deadlineAt))
+      && Date.parse(question.deadlineAt) - Date.parse(question.startedAt) === TIMED_QUESTION_DURATION_MS
+      && (question.serverNow === null || (typeof question.serverNow === 'string' && Number.isFinite(Date.parse(question.serverNow))))
+      && (question.guess === null || (typeof question.guess === 'number' && Number.isFinite(question.guess) && question.guess > 0))
+      && (question.actualPrice === null || (typeof question.actualPrice === 'number' && Number.isFinite(question.actualPrice) && question.actualPrice > 0))
+      && (question.score === null || (Number.isInteger(question.score) && question.score >= 0 && question.score <= 1000))
+      && (question.explanation === null || typeof question.explanation === 'string')
+      && (question.outcome === 'active'
+        ? question.guess === null && question.actualPrice === null && question.score === null && question.explanation === null
+        : question.outcome === 'answered'
+          ? question.guess !== null && question.actualPrice !== null && question.score !== null
+          : question.guess === null && question.actualPrice !== null && question.score === 0))
+    || (progress.ruleset === 'timed-v1' && progress.guestQuestionIds !== null)
+    || (progress.guestQuestionIds !== null && progress.guestQuestionIds !== undefined && (!Array.isArray(progress.guestQuestionIds)
+      || progress.guestQuestionIds.length !== 5 || progress.guestQuestionIds.some(id => typeof id !== 'string')))
+    || (progress.ruleset === 'guest-timed-v1' && (!progress.guestQuestionIds
+      || getQuestions(progress.guestQuestionIds).length !== 5 || new Set(progress.guestQuestionIds).size !== 5))
+    || timedQuestions.filter(question => question.outcome === 'active').length > 1
+    || timedQuestions.some((question, index) => question.outcome === 'active' && index !== timedQuestions.length - 1)) {
+    return null
+  }
+  if (progress.completed && (timedQuestions.length !== 5 || timedQuestions.some(question => question.outcome === 'active'))) {
+    return null
+  }
+
+  return {
+    date: progress.date,
+    challengeId: typeof progress.challengeId === 'string' ? progress.challengeId : null,
+    ruleset: progress.ruleset,
+    isDemo: Boolean(progress.isDemo),
+    questions: timedQuestions.map(question => ({ ...question })),
+    guestQuestionIds: progress.guestQuestionIds ? [...progress.guestQuestionIds] : null,
+    serverRoundTripMs: progress.serverRoundTripMs ?? 0,
+    completed: Boolean(progress.completed),
+    updatedAt: typeof progress.updatedAt === 'number' ? progress.updatedAt : 0,
+  }
+}
+
 function defaultState(today: string): AppState {
   return {
-    version: 2,
+    version: 3,
     daily: newDaily(today),
+    timedDaily: null,
     archivedDaily: [],
+    archivedTimedDaily: [],
     history: [],
     questionHistory: [],
     currentStreak: 0,
@@ -225,11 +478,15 @@ export function loadState(storageKey = STORAGE_KEY, today = croatiaDateKey()): A
     if (!raw) return fallback
     const saved = JSON.parse(raw) as Partial<AppState>
     const daily = normalizeDaily(saved.daily)
-    if ((saved.version !== 1 && saved.version !== 2) || !daily) return fallback
+    if ((saved.version !== 1 && saved.version !== 2 && saved.version !== 3) || !daily) return fallback
 
     const archived = (Array.isArray(saved.archivedDaily) ? saved.archivedDaily : [])
       .map(normalizeDaily)
       .filter((entry): entry is DailyProgress => Boolean(entry))
+    const archivedTimed = (Array.isArray(saved.archivedTimedDaily) ? saved.archivedTimedDaily : [])
+      .map(normalizeTimedDaily)
+      .filter((entry): entry is TimedDailyProgress => Boolean(entry))
+    const timedDaily = normalizeTimedDaily(saved.timedDaily)
     const questionHistory = Array.isArray(saved.questionHistory)
       ? saved.questionHistory.filter(entry=>entry&&/^\d{4}-\d{2}-\d{2}$/.test(entry.date)&&Array.isArray(entry.questionIds))
         .map(entry=>({date:entry.date,questionIds:entry.questionIds.filter(id=>typeof id==='string'&&questions.some(question=>question.id===id))}))
@@ -239,17 +496,20 @@ export function loadState(storageKey = STORAGE_KEY, today = croatiaDateKey()): A
       if(!questionHistory.some(entry=>entry.date===daily.date))questionHistory.push({date:daily.date,questionIds:daily.questionIds})
       if(!daily.completed)archived.push(daily)
     }
+    if (timedDaily && timedDaily.date !== today) archivedTimed.push(timedDaily)
     const recentQuestionHistory=questionHistory.sort((a,b)=>a.date.localeCompare(b.date)).slice(-30)
     const currentDaily = daily.date === today ? daily : newDaily(today,undefined,null,recentQuestionHistory)
     const history = Array.isArray(saved.history) ? saved.history.filter(entry =>
       entry && /^\d{4}-\d{2}-\d{2}$/.test(entry.date)
-      && Number.isFinite(entry.score) && Number.isFinite(entry.accuracy) && Number.isFinite(entry.exact),
+      && Number.isFinite(entry.score) && (entry.accuracy === null || Number.isFinite(entry.accuracy)) && Number.isFinite(entry.exact),
     ) : []
 
     return {
-      version: 2,
+      version: 3,
       daily: currentDaily,
+      timedDaily: timedDaily?.date === today ? timedDaily : null,
       archivedDaily: archived.filter(entry => !entry.completed).slice(-30),
+      archivedTimedDaily: archivedTimed.filter(entry => !entry.completed).slice(-30),
       history,
       questionHistory: recentQuestionHistory,
       currentStreak: getActiveStreak(
@@ -279,16 +539,24 @@ export function saveState(state: AppState, storageKey = STORAGE_KEY) {
 
 export function rolloverDaily(state: AppState, today: string, questionIds?: string[], challengeId: string | null = null) {
   if (state.daily.date === today) return state
-  const questionHistory=state.daily.completed||state.daily.guesses.some(guess=>guess!==null)
-    ?[...state.questionHistory.filter(entry=>entry.date!==state.daily.date),{date:state.daily.date,questionIds:state.daily.questionIds}].sort((a,b)=>a.date.localeCompare(b.date)).slice(-30)
+  const timedQuestionIds=state.timedDaily?.date===state.daily.date?state.timedDaily.questions.map(question=>question.questionId):[]
+  const hasPlayedChallenge=state.daily.completed||state.daily.guesses.some(guess=>guess!==null)||timedQuestionIds.length>0
+  const questionHistory=hasPlayedChallenge
+    ?[...state.questionHistory.filter(entry=>entry.date!==state.daily.date),{date:state.daily.date,questionIds:timedQuestionIds.length?timedQuestionIds:state.daily.questionIds}].sort((a,b)=>a.date.localeCompare(b.date)).slice(-30)
     :state.questionHistory
   const archivedDaily = !state.daily.completed && state.daily.guesses.some(guess => guess !== null)
     ? [...state.archivedDaily, state.daily].slice(-30)
     : state.archivedDaily
+  const archivedTimedDaily = state.timedDaily && !state.timedDaily.completed
+    ? [...state.archivedTimedDaily, state.timedDaily].slice(-30)
+    : state.archivedTimedDaily
   return {
     ...state,
+    version: 3,
     daily: newDaily(today, questionIds??selectDailyQuestions(today,questionHistory), challengeId, questionHistory),
+    timedDaily: null,
     archivedDaily,
+    archivedTimedDaily,
     questionHistory,
     currentStreak: getActiveStreak(
       state.history.length ? state.history[state.history.length - 1].date : null,
