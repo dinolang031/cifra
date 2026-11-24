@@ -4,8 +4,8 @@
   "description":"Dnevni hrvatski kviz o cijenama.",
   "start_url":"/",
   "display":"standalone",
-  "background_color":"#F7F5F0",
-  "theme_color":"#C7F36B",
+  "background_color":"#061C20",
+  "theme_color":"#061C20",
   "lang":"hr",
   "icons":[
     {"src":"/favicon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
