@@ -27,6 +27,12 @@ export interface Database {
         Update: never
         Relationships: []
       }
+      challenge_attempt_answers: {
+        Row: { attempt_id: string; question_position: number; guess: number; score: number; answered_at: string }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
       game_results: {
         Row: { id: string; user_id: string; challenge_id: string; challenge_date: string; total_score: number; guesses: number[]; question_scores: number[]; exact_guesses: number; average_error_percent: number; completed_at: string }
         Insert: never
@@ -44,6 +50,8 @@ export interface Database {
     Functions: {
       get_today_challenge: { Args: Record<string, never>; Returns: { challenge_id: string; challenge_date: string; question_ids: string[]; is_demo: boolean }[] }
       start_daily_attempt: { Args: { p_challenge_date: string }; Returns: { attempt_token: string; challenge_id: string; challenge_date: string }[] }
+      get_daily_attempt_progress: { Args: { p_challenge_date: string }; Returns: { guesses: number[]; question_scores: number[]; actual_prices: number[]; answered_count: number }[] }
+      submit_daily_answer: { Args: { p_challenge_date: string; p_question_position: number; p_guess: number; p_attempt_token: string }; Returns: { question_position: number; accepted_guess: number; actual_price: number; question_score: number; duplicate: boolean }[] }
       submit_daily_result: { Args: { p_challenge_date: string; p_guesses: number[]; p_attempt_token: string }; Returns: { result_id: string; total_score: number; question_scores: number[]; exact_guesses: number; average_error_percent: number; current_streak: number; best_streak: number; duplicate: boolean }[] }
     }
     Enums: Record<string, never>

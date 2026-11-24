@@ -19,6 +19,21 @@ export interface CloudGameResult {
   duplicate: boolean
 }
 
+export interface CloudAnswerResult {
+  question_position: number
+  accepted_guess: number
+  actual_price: number
+  question_score: number
+  duplicate: boolean
+}
+
+export interface CloudAttemptProgress {
+  guesses: number[]
+  question_scores: number[]
+  actual_prices: number[]
+  answered_count: number
+}
+
 export interface CloudSnapshot {
   currentStreak: number
   bestStreak: number
@@ -54,6 +69,34 @@ export async function startDailyAttempt(date: string): Promise<string> {
   const attempt = data?.[0]
   if (!attempt?.attempt_token) throw new Error('Poslužitelj nije otvorio pokušaj današnjeg izazova.')
   return attempt.attempt_token
+}
+
+export async function fetchDailyAttemptProgress(date: string): Promise<CloudAttemptProgress | null> {
+  if (!supabase) throw new Error('Supabase nije konfiguriran.')
+  const { data, error } = await supabase.rpc('get_daily_attempt_progress', {
+    p_challenge_date: date,
+  })
+  if (error) throw error
+  return data?.[0] ?? null
+}
+
+export async function submitDailyAnswer(
+  date: string,
+  position: number,
+  guess: number,
+  attemptToken: string,
+): Promise<CloudAnswerResult> {
+  if (!supabase) throw new Error('Supabase nije konfiguriran.')
+  const { data, error } = await supabase.rpc('submit_daily_answer', {
+    p_challenge_date: date,
+    p_question_position: position,
+    p_guess: guess,
+    p_attempt_token: attemptToken,
+  })
+  if (error) throw error
+  const answer = data?.[0]
+  if (!answer) throw new Error('Poslužitelj nije potvrdio procjenu.')
+  return answer
 }
 
 export async function submitResult(date: string, guesses: number[], attemptToken: string): Promise<CloudGameResult> {
