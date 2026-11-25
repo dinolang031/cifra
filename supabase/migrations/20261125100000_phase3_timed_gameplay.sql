@@ -31,11 +31,31 @@ create table public.challenge_attempt_questions (
   primary key (attempt_id, question_position),
   check (deadline_at = started_at + interval '20 seconds'),
   check (
-    (status = 'active' and resolved_at is null and guess is null and score is null)
-    or (status = 'answered' and resolved_at is not null and guess > 0 and guess <= 1000000000 and score between 0 and 1000)
-    or (status = 'timed_out' and resolved_at is not null and guess is null and score = 0)
+    (
+      status = 'active'
+      and resolved_at is null
+      and guess is null
+      and score is null
+    )
+    or (
+      status = 'answered'
+      and resolved_at is not null
+      and guess is not null
+      and guess > 0
+      and guess <= 1000000000
+      and score is not null
+      and score between 0 and 1000
+    )
+    or (
+      status = 'timed_out'
+      and resolved_at is not null
+      and guess is null
+      and score is not null
+      and score = 0
+    )
   ),
-  check (resolved_at is null or resolved_at >= started_at)
+  check (resolved_at is null or resolved_at >= started_at),
+  check (status <> 'timed_out' or resolved_at >= deadline_at)
 );
 
 create unique index challenge_attempt_questions_one_active_idx
@@ -47,17 +67,22 @@ revoke all on public.challenge_attempt_questions from public, anon, authenticate
 
 alter table public.game_results
   drop constraint if exists game_results_guesses_check;
+
 alter table public.game_results
   add constraint game_results_guesses_shape_check
   check (
-    array_ndims(guesses) = 1
+    guesses is not null
+    and cardinality(guesses) = 5
+    and array_ndims(guesses) = 1
     and array_lower(guesses, 1) = 1
     and array_upper(guesses, 1) = 5
-    and 0 < all(guesses)
-    and 1000000000 >= all(guesses)
+    and 0 < all(array_remove(guesses, null::numeric))
+    and 1000000000 >= all(array_remove(guesses, null::numeric))
   );
 alter table public.game_results
   alter column average_error_percent drop not null;
+alter table public.game_results
+  alter column average_error_percent type numeric;
 alter table public.game_results
   drop constraint if exists game_results_average_error_percent_check;
 alter table public.game_results
@@ -637,9 +662,13 @@ begin
     raise exception 'challenge_question_data_is_invalid';
   end if;
 
+  if abs(p_guess - v_actual_price) / v_actual_price >= 2 then
+  v_score := 0;
+  else
   v_score := greatest(0, least(1000,
     round(1000 * exp(-4 * abs(p_guess::double precision - v_actual_price::double precision)
       / v_actual_price::double precision))::integer));
+  end if;
   v_now := clock_timestamp();
   update public.challenge_attempt_questions as timed_questions
   set status = 'answered', resolved_at = v_now, guess = p_guess, score = v_score
@@ -952,10 +981,6 @@ begin
     return;
   end if;
   if v_attempt.submitted_at is not null then raise exception 'challenge_attempt_already_submitted'; end if;
-  if v_now < v_attempt.started_at + interval '10 seconds' then
-    raise exception 'challenge_attempt_submitted_too_soon';
-  end if;
-
   select count(*)::integer,
     count(*) filter (where timed_questions.status in ('answered', 'timed_out'))::integer,
     array_agg(
@@ -1049,5 +1074,197 @@ grant execute on function public.start_timed_question(date, smallint, text) to a
 grant execute on function public.submit_timed_answer(date, smallint, numeric, text) to authenticated;
 grant execute on function public.expire_timed_question(date, smallint, text) to authenticated;
 grant execute on function public.submit_timed_daily_result(date, text) to authenticated;
+
+create or replace function public.submit_daily_result(p_challenge_date date, p_guesses numeric[], p_attempt_token text)
+returns table (
+  result_id uuid,
+  total_score integer,
+  question_scores integer[],
+  exact_guesses smallint,
+  average_error_percent numeric,
+  current_streak integer,
+  best_streak integer,
+  duplicate boolean
+)
+language plpgsql
+security definer
+set search_path = pg_catalog, public, pg_temp
+as $$
+#variable_conflict error
+declare
+  authenticated_user_id uuid := auth.uid();
+  today_in_croatia date := (now() at time zone 'Europe/Zagreb')::date;
+  challenge_row public.daily_challenges%rowtype;
+  existing_result public.game_results%rowtype;
+  attempt_row public.challenge_attempts%rowtype;
+  attempt_token_row public.challenge_attempt_tokens%rowtype;
+  stats public.user_statistics%rowtype;
+  actual_prices numeric(12,2)[] := array[]::numeric(12,2)[];
+  calculated_scores integer[] := array[]::integer[];
+  error_sum double precision := 0;
+  score_sum integer := 0;
+  exact_count smallint := 0;
+  relative_error double precision;
+  next_streak integer;
+  i integer;
+begin
+  if authenticated_user_id is null then raise exception 'authentication_required'; end if;
+  if p_challenge_date is distinct from today_in_croatia then
+    raise exception 'challenge_date_must_be_today_in_europe_zagreb';
+  end if;
+  if p_attempt_token is null or p_attempt_token !~ '^[0-9a-f]{64}$' then
+    raise exception 'valid_challenge_attempt_token_required';
+  end if;
+  if p_guesses is null or array_ndims(p_guesses) <> 1
+    or array_lower(p_guesses, 1) <> 1 or array_upper(p_guesses, 1) <> 5 then
+    raise exception 'exactly_five_guesses_required';
+  end if;
+
+  for i in 1..5 loop
+    if p_guesses[i] is null or p_guesses[i] <= 0 or p_guesses[i] > 1000000000 then
+      raise exception 'guesses_must_be_positive_euro_amounts';
+    end if;
+    if scale(p_guesses[i]) > 2 then
+      raise exception 'guesses_must_have_at_most_two_decimal_places';
+    end if;
+  end loop;
+
+  perform * from public.get_today_challenge();
+  select daily_challenges.* into challenge_row
+  from public.daily_challenges as daily_challenges
+  where daily_challenges.challenge_date = today_in_croatia
+    and daily_challenges.published;
+  if not found then raise exception 'challenge_not_available'; end if;
+
+  select challenge_attempts.* into attempt_row
+  from public.challenge_attempts as challenge_attempts
+  where challenge_attempts.user_id = authenticated_user_id
+    and challenge_attempts.challenge_id = challenge_row.id
+  for update;
+  if not found or attempt_row.challenge_date <> p_challenge_date then
+    raise exception 'challenge_attempt_not_found_or_invalid';
+  end if;
+  if attempt_row.ruleset = 'timed-v1' then
+  raise exception 'timed_attempt_requires_timed_submission';
+  end if;
+  select attempt_tokens.* into attempt_token_row
+  from public.challenge_attempt_tokens as attempt_tokens
+  where attempt_tokens.attempt_id = attempt_row.id
+    and attempt_tokens.token_hash = encode(extensions.digest(p_attempt_token, 'sha256'), 'hex')
+  for update;
+  if not found or now() >= attempt_token_row.expires_at then
+    raise exception 'challenge_attempt_token_expired_or_invalid';
+  end if;
+
+  insert into public.user_statistics (user_id)
+  values (authenticated_user_id) on conflict on constraint user_statistics_pkey do nothing;
+  select user_statistics.* into stats
+  from public.user_statistics as user_statistics
+  where user_statistics.user_id = authenticated_user_id
+  for update;
+  select game_results.* into existing_result
+  from public.game_results as game_results
+  where game_results.user_id = authenticated_user_id
+    and game_results.challenge_id = challenge_row.id;
+  if attempt_row.submitted_at is not null then
+    if not found then raise exception 'challenge_attempt_already_submitted'; end if;
+    return query select existing_result.id as result_id,
+      existing_result.total_score as total_score,
+      existing_result.question_scores as question_scores,
+      existing_result.exact_guesses as exact_guesses,
+      existing_result.average_error_percent as average_error_percent,
+      stats.current_streak as current_streak,
+      stats.best_streak as best_streak,
+      true as duplicate;
+    return;
+  end if;
+  if found then
+    update public.challenge_attempts as challenge_attempts
+    set submitted_at = now()
+    where challenge_attempts.id = attempt_row.id;
+    return query select existing_result.id as result_id,
+      existing_result.total_score as total_score,
+      existing_result.question_scores as question_scores,
+      existing_result.exact_guesses as exact_guesses,
+      existing_result.average_error_percent as average_error_percent,
+      stats.current_streak as current_streak,
+      stats.best_streak as best_streak,
+      true as duplicate;
+    return;
+  end if;
+  if now() < attempt_row.started_at + interval '10 seconds' then
+    raise exception 'challenge_attempt_submitted_too_soon';
+  end if;
+  if now() >= attempt_row.expires_at then raise exception 'challenge_attempt_expired'; end if;
+
+  select array_agg(challenge_questions.actual_price_snapshot order by challenge_questions.position)
+    into actual_prices
+  from public.challenge_questions as challenge_questions
+  where challenge_questions.challenge_id = challenge_row.id
+    and challenge_questions.currency_snapshot = 'EUR'
+    and challenge_questions.is_demo_snapshot = challenge_row.is_demo
+    and (
+      (challenge_row.is_demo and challenge_questions.verification_status_snapshot = 'unverified')
+      or (not challenge_row.is_demo and challenge_questions.verification_status_snapshot = 'verified')
+    );
+  if actual_prices is null or cardinality(actual_prices) <> 5 then
+    raise exception 'challenge_question_data_is_invalid';
+  end if;
+
+  for i in 1..5 loop
+    relative_error := abs(p_guesses[i]::double precision - actual_prices[i]::double precision)
+      / actual_prices[i]::double precision;
+    calculated_scores := array_append(
+    calculated_scores,
+    case
+    when relative_error >= 2 then 0
+    else greatest(0, least(1000,
+      round(1000 * exp(-4 * relative_error))::integer))
+    end
+    );
+    score_sum := score_sum + calculated_scores[i];
+    error_sum := error_sum + relative_error;
+    if p_guesses[i] = actual_prices[i] then exact_count := exact_count + 1; end if;
+  end loop;
+
+  if stats.last_completed_date is null then next_streak := 1;
+  elsif stats.last_completed_date = today_in_croatia - 1 then next_streak := stats.current_streak + 1;
+  else next_streak := 1;
+  end if;
+
+  insert into public.game_results as inserted_result (
+    user_id, challenge_id, challenge_date, total_score, guesses, question_scores,
+    exact_guesses, average_error_percent
+  ) values (
+    authenticated_user_id, challenge_row.id, today_in_croatia, score_sum, p_guesses, calculated_scores,
+    exact_count, round(((error_sum / 5) * 100)::numeric, 2)
+  ) returning inserted_result.id into result_id;
+
+  update public.user_statistics as user_statistics set
+    current_streak = next_streak,
+    best_streak = greatest(stats.best_streak, next_streak),
+    last_completed_date = today_in_croatia,
+    total_games = stats.total_games + 1,
+    total_points = stats.total_points + score_sum,
+    best_score = greatest(stats.best_score, score_sum),
+    exact_guesses = stats.exact_guesses + exact_count,
+    updated_at = now()
+  where user_statistics.user_id = authenticated_user_id
+  returning user_statistics.* into stats;
+
+  update public.challenge_attempts as challenge_attempts
+  set submitted_at = now()
+  where challenge_attempts.id = attempt_row.id;
+
+  return query select result_id as result_id,
+    score_sum as total_score,
+    calculated_scores as question_scores,
+    exact_count as exact_guesses,
+    round(((error_sum / 5) * 100)::numeric, 2) as average_error_percent,
+    stats.current_streak as current_streak,
+    stats.best_streak as best_streak,
+    false as duplicate;
+end;
+$$;
 
 commit;

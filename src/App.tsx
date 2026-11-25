@@ -37,19 +37,30 @@ const readAttemptToken=(userId:string,date:string)=>{
     return ''
   }
 }
+const getErrorMessage=(error:unknown,fallback='')=>{
+  if(typeof error==='object'&&error!==null&&
+    'message' in error&&typeof error.message==='string'){
+    return error.message
+  }
+  return fallback
+}
 const cloudErrorMessage=(error:unknown,fallback:string)=>{
-  const message=error instanceof Error?error.message:fallback
+  const message=getErrorMessage(error,fallback)
   if(message.includes('challenge_attempt_submitted_too_soon'))return 'Rezultat se može poslati nakon kratkog vremena provedenog u izazovu. Pričekaj nekoliko sekundi i pokušaj ponovno.'
   if(message.includes('challenge_attempt_expired'))return 'Pokušaj je istekao. Vrati se na početnu i ponovno pokreni današnji izazov.'
   if(message.includes('challenge_attempt_already_submitted'))return 'Današnji rezultat je već spremljen.'
-  if(error instanceof Error&&'code' in error&&typeof error.code==='string'){
+  if(typeof error==='object'&&error!==null&&'code' in error&&typeof error.code==='string'){
     return `Pogreška baze podataka (${error.code}): ${message}`
   }
   return message
 }
 const isNetworkFailure=(error:unknown)=>{
-  if(error instanceof Error&&'code' in error&&typeof error.code==='string')return false
-  return error instanceof TypeError||(error instanceof Error&&/network|fetch|offline/i.test(error.message))
+  if(typeof error==='object'&&error!==null&&
+    'code' in error&&typeof error.code==='string'&&
+    error.code!=='')return false
+
+  return error instanceof TypeError||
+    /network|fetch|offline/i.test(getErrorMessage(error))
 }
 
 function Logo(){return <Link className="logo" to="/" aria-label="CIFRA početna"><img src="/assets/logo.webp" alt="CIFRA"/></Link>}
@@ -438,7 +449,10 @@ export default function App(){
   },[])
 
   useEffect(()=>{
-    if(!supabase||user?.id)return
+    if(!supabase||user?.id){
+    queueMicrotask(()=>setGuestModeLoading(false))
+    return
+    }
     let active=true
     void fetchPublicTimedGameplayEnabled().then(enabled=>{
       if(!active)return
@@ -485,11 +499,13 @@ export default function App(){
           })
           return
         }
+        if(snapshot.todayResult?.challengeId!==mode.challenge_id){
         const started=await startTimedDailyAttempt(today)
         if(!active||userRef.current?.id!==userId||croatiaDateKey()!==today)return
         attemptToken.current=started.attempt_token
         attemptTokenKey.current=`${userId}:${today}`
         storeAttemptToken(userId,today,started.attempt_token)
+        }
         const progressStart=performance.now()
         const rows=await fetchTimedAttemptProgress(today)
         const roundTrip=performance.now()-progressStart
@@ -689,7 +705,7 @@ export default function App(){
     let token=await getTimedAttemptToken(date)
     try{return await operation(token)}
     catch(error){
-      if(!(error instanceof Error)||!error.message.includes('challenge_attempt_token_expired_or_invalid'))throw error
+      if(!getErrorMessage(error).includes('challenge_attempt_token_expired_or_invalid'))throw error
       token=await getTimedAttemptToken(date,true)
       return operation(token)
     }

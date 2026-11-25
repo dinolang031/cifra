@@ -198,7 +198,7 @@ begin
     when others then
       get stacked diagnostics v_sqlerrm = message_text;
       if v_sqlerrm = 'test_expected_out_of_order_start_rejection' then raise; end if;
-      if v_sqlerrm <> 'timed_questions_must_be_started_in_order' then raise; end if;
+      if v_sqlerrm <> 'previous_timed_question_must_be_resolved' then raise; end if;
   end;
 
   select challenge_questions.actual_price_snapshot
@@ -306,14 +306,14 @@ begin
 
   for v_position in 3..5 loop
     select * into v_started
-    from public.start_timed_question(v_today, v_position, v_token);
+    from public.start_timed_question(v_today, v_position::smallint, v_token);
     select challenge_questions.actual_price_snapshot
     into v_price
     from public.challenge_questions as challenge_questions
     where challenge_questions.challenge_id = v_challenge_id
       and challenge_questions.position = v_position;
     select * into v_answer
-    from public.submit_timed_answer(v_today, v_position, v_price, v_token);
+    from public.submit_timed_answer(v_today, v_position::smallint, v_price, v_token);
     if v_answer.question_score <> 1000 then
       raise exception 'Exact answer at position % did not score 1,000', v_position;
     end if;
@@ -355,7 +355,7 @@ begin
   for v_position in 1..5 loop
     if v_position > 1 then
       select * into v_started
-      from public.start_timed_question(v_today, v_position, v_token);
+      from public.start_timed_question(v_today, v_position::smallint, v_token);
     end if;
     v_past := clock_timestamp() - interval '1 minute';
     update public.challenge_attempt_questions as timed_questions
@@ -366,7 +366,7 @@ begin
     )
       and timed_questions.question_position = v_position;
     select * into v_answer
-    from public.expire_timed_question(v_today, v_position, v_token);
+    from public.expire_timed_question(v_today, v_position::smallint, v_token);
     if v_answer.outcome <> 'timed_out' or v_answer.question_score <> 0 or v_answer.guess is not null then
       raise exception 'Timed-out question % was not recorded correctly', v_position;
     end if;
@@ -389,7 +389,7 @@ begin
   for v_position in 1..5 loop
     if v_position > 1 then
       select * into v_started
-      from public.start_timed_question(v_today, v_position, v_token);
+      from public.start_timed_question(v_today, v_position::smallint, v_token);
     end if;
     select challenge_questions.actual_price_snapshot
     into v_price
@@ -397,7 +397,7 @@ begin
     where challenge_questions.challenge_id = v_challenge_id
       and challenge_questions.position = v_position;
     select * into v_answer
-    from public.submit_timed_answer(v_today, v_position, v_price, v_token);
+    from public.submit_timed_answer(v_today, v_position::smallint, v_price, v_token);
     if v_answer.question_score <> 1000 then raise exception 'Exact timed answer scored incorrectly'; end if;
   end loop;
   select * into v_result from public.submit_timed_daily_result(v_today, v_token);
